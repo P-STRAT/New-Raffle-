@@ -1,12 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAccount, useWriteContract, useReadContract, useConnect, useDisconnect } from 'wagmi';
 import { useWriteContractSponsored } from '@abstract-foundation/agw-react';
 import { getGeneralPaymasterInput } from 'viem/zksync';
 import { isAddress } from 'viem';
 
-// Configuration
 const RAFFLE_CONTRACT_ADDRESS = 
   (process.env.NEXT_PUBLIC_RAFFLE_CONTRACT as `0x${string}`) || 
   '0xB05585a897BBA3bA6F9AbDC415034BF88189238F';
@@ -15,7 +14,6 @@ const PAYMASTER_ADDRESS =
   (process.env.NEXT_PUBLIC_PAYMASTER_ADDRESS as `0x${string}`) ||
   '0x5407B5040dec3D339A9247f3654E59EEccbb6391';
 
-// Raffle contract ABI
 const RAFFLE_ABI = [
   {
     inputs: [
@@ -77,38 +75,29 @@ const RAFFLE_ABI = [
   }
 ] as const;
 
-// Extend Window interface for ethereum
 declare global {
   interface Window {
     ethereum?: any;
   }
 }
 
-// Helper to add Abstract Network to MetaMask
-async function addAbstractNetwork() {
+async function addAbstractMainnet() {
   if (typeof window !== 'undefined' && window.ethereum) {
     try {
       await window.ethereum.request({
         method: 'wallet_addEthereumChain',
         params: [{
-          chainId: '0xAB5', // 2741 in hex
+          chainId: '0xAB5',
           chainName: 'Abstract Mainnet',
-          nativeCurrency: {
-            name: 'ETH',
-            symbol: 'ETH',
-            decimals: 18
-          },
+          nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
           rpcUrls: ['https://api.mainnet.abs.xyz'],
           blockExplorerUrls: ['https://abscan.org']
         }]
       });
-      return true;
     } catch (error) {
-      console.error('Failed to add network:', error);
-      return false;
+      console.error('Failed to add Abstract Mainnet:', error);
     }
   }
-  return false;
 }
 
 export default function RaffleDApp() {
@@ -117,136 +106,254 @@ export default function RaffleDApp() {
   const { disconnect } = useDisconnect();
   
   const isAbstractWallet = connector?.id === 'abstract';
-  const [activeTab, setActiveTab] = useState<'create' | 'pick' | 'view'>('create');
 
   const handleConnect = async (connectorToUse: any) => {
-    // If it's MetaMask, add the network first
-    if (connectorToUse.name.toLowerCase().includes('metamask')) {
-      await addAbstractNetwork();
+    // Add Abstract network for MetaMask/Injected wallets
+    if (connectorToUse.id !== 'abstract') {
+      await addAbstractMainnet();
     }
     connect({ connector: connectorToUse });
   };
 
+  // Configuration from old file
+  const CONFIG = {
+    WORKER: 'https://pudgy-floor-proxy.pdgystr.workers.dev',
+    ABSTRACT_RPC: 'https://api.mainnet.abs.xyz',
+    NFT_CHAIN: 'ethereum',
+    COLLECTION_SLUG: 'pudgypenguins',
+    CONTRACT: '0xBd3531dA5CF5857e7CfAA92426877b022e612cf8',
+    TREASURY: '0x4B550Aad15F5D28179e5Bc6918113bf64181621c',
+  };
+  
+  const [pudgyHoldings, setPudgyHoldings] = useState<any[]>([]);
+  const [treasuryEth, setTreasuryEth] = useState<number>(0);
+  const [targetPrice, setTargetPrice] = useState<number>(0);
+  const [targetId, setTargetId] = useState<string>('');
+  const [targetImage, setTargetImage] = useState<string>('');
+  const [targetLink, setTargetLink] = useState<string>('');
+
+  // Helper functions from old file
+  const fmtEth = (n: number) => { 
+    if (n === 0) return '0'; 
+    if (!isFinite(n)) return '—'; 
+    const v = Number(n); 
+    return (v >= 1 ? v.toFixed(4) : v.toFixed(6)).replace(/0+$/, '').replace(/\.$/, ''); 
+  };
+
+  function hexWeiToEth(hex: string): number {
+    try {
+      const wei = BigInt(hex);
+      const divisor = BigInt(10) ** BigInt(18);
+      const whole = wei / divisor;
+      const remainder = wei % divisor;
+      const frac = remainder.toString().padStart(18, '0').replace(/0+$/, '');
+      return Number(frac ? `${whole}.${frac}` : whole.toString());
+    } catch {
+      return 0;
+    }
+  }
+
+  function extractEthPrice(obj: any): number | null {
+    if (obj == null) return null;
+    if (typeof obj === 'number' && isFinite(obj) && obj > 0) return obj;
+    if (typeof obj === 'string') {
+      const n = Number(obj);
+      if (isFinite(n) && n > 0) return n;
+    }
+    if (obj.eth != null) {
+      const n = Number(obj.eth);
+      if (isFinite(n) && n > 0) return n;
+    }
+    if (obj.amount != null) {
+      const n = Number(obj.amount);
+      if (isFinite(n) && n > 0) return n;
+    }
+    return null;
+  }
+
+  async function getJson(url: string) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url);
+    return r.json();
+  }
+
+  // Fetch data exactly like old file
+  useEffect(() => {
+    async function loadData() {
+      try {
+        // 1. Load holdings
+        const holdingsData = await getJson(
+          `${CONFIG.WORKER}/account/${CONFIG.NFT_CHAIN}/${CONFIG.TREASURY}/nfts?limit=48&collection_slug=${CONFIG.COLLECTION_SLUG}`
+        );
+        const nfts = Array.isArray(holdingsData?.nfts) ? holdingsData.nfts : [];
+        setPudgyHoldings(nfts);
+
+        // 2. Load treasury ETH
+        const balanceData = await getJson(
+          `${CONFIG.WORKER}/balance/abstract/${CONFIG.TREASURY}`
+        );
+        if (typeof balanceData?.eth === 'number') {
+          setTreasuryEth(balanceData.eth);
+        } else if (balanceData?.eth_str) {
+          setTreasuryEth(Number(balanceData.eth_str));
+        } else {
+          // Fallback to direct RPC
+          const rpcResp = await fetch(CONFIG.ABSTRACT_RPC, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'eth_getBalance',
+              params: [CONFIG.TREASURY, 'latest']
+            })
+          });
+          const rpcData = await rpcResp.json();
+          if (rpcData?.result) {
+            setTreasuryEth(hexWeiToEth(rpcData.result));
+          }
+        }
+
+        // 3. Load cheapest Pudgy (exact logic from old file)
+        const limits = [120, 80, 50, 30];
+        for (const L of limits) {
+          try {
+            const cheapestData = await getJson(
+              `${CONFIG.WORKER}/collection/${encodeURIComponent(CONFIG.COLLECTION_SLUG)}/cheapest?chain=${CONFIG.NFT_CHAIN}&limit=${L}`
+            );
+            const arr = Array.isArray(cheapestData?.listings) ? cheapestData.listings : [];
+            if (!arr.length) continue;
+
+            const normalized = arr.map((it: any) => {
+              const price = Number.isFinite(it.price_eth) ? it.price_eth : extractEthPrice(it.price);
+              return { ...it, _priceEth: price };
+            });
+
+            const withPrice = normalized.filter((x: any) => Number.isFinite(x._priceEth) && x._priceEth > 0);
+            const pick = withPrice.length
+              ? withPrice.sort((a: any, b: any) => a._priceEth - b._priceEth)[0]
+              : normalized.find((x: any) => x.contract && x.identifier);
+
+            if (!pick) continue;
+
+            const id = String(pick.identifier);
+            const link = `https://opensea.io/assets/${CONFIG.NFT_CHAIN}/${pick.contract}/${id}`;
+            let image = pick.image_url || null;
+
+            if (!image) {
+              try {
+                const meta = await getJson(`${CONFIG.WORKER}/nft/${CONFIG.NFT_CHAIN}/${pick.contract}/${id}`);
+                image = meta?.image_url || null;
+              } catch {}
+            }
+
+            setTargetPrice(pick._priceEth ?? 0);
+            setTargetId(id);
+            setTargetImage(image || '');
+            setTargetLink(link);
+            break;
+          } catch (e) {
+            console.warn('OpenSea cheapest failed', e);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load Pudgy data:', err);
+      }
+    }
+
+    loadData();
+    const interval = setInterval(loadData, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900">
-      {/* Animated Background Pattern */}
-      <div className="fixed inset-0 opacity-10">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(255,255,255,0.1),transparent_50%)]"></div>
-      </div>
+    <div className="min-h-screen text-white relative">
+      {/* Background Images - Using your custom images */}
+      <div 
+        className="fixed inset-0 z-0 bg-center bg-cover bg-no-repeat"
+        style={{ backgroundImage: 'url(/PDGYSTR_BGDK.png)' }}
+      />
+      <div 
+        className="fixed inset-0 z-0 bg-center bg-cover bg-no-repeat opacity-65 blur-sm"
+        style={{ backgroundImage: 'url(/PDGYBG2DK.png)' }}
+      />
 
-      <div className="relative z-10 container mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <h1 className="text-6xl font-bold text-white mb-4 drop-shadow-lg">
-            Raffle dApp
-          </h1>
-          <p className="text-xl text-blue-200">
-            Provably Fair On-Chain Raffles
-          </p>
-        </div>
-
-        {/* Wallet Connection */}
-        <div className="max-w-md mx-auto mb-8 bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl p-6">
-          {!isConnected ? (
-            <div className="space-y-4">
-              <h2 className="text-2xl font-bold text-white text-center mb-4">
-                Connect Your Wallet
-              </h2>
-              <p className="text-blue-200 text-center text-sm mb-6">
-                Use Abstract Global Wallet for gasless transactions, or connect with MetaMask
-              </p>
-              {connectors.map((conn) => (
-                <button
-                  key={conn.id}
-                  onClick={() => handleConnect(conn)}
-                  className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105 shadow-lg"
-                >
-                  {conn.name === 'Abstract' ? 'Connect with Abstract' : `Connect ${conn.name}`}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="text-center">
-                <p className="text-sm text-blue-300 mb-2">
-                  {isAbstractWallet ? 'Connected via Abstract' : 'Connected via Browser Wallet'}
-                </p>
-                <p className="text-white font-mono text-sm bg-black/30 px-4 py-2 rounded-lg break-all">
-                  {address}
-                </p>
-              </div>
-              <button
-                onClick={() => disconnect()}
-                className="w-full bg-red-500 hover:bg-red-600 text-white font-semibold py-3 px-6 rounded-xl transition-all duration-300"
-              >
-                Disconnect
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Main Content */}
-        {isConnected && (
-          <div className="max-w-4xl mx-auto">
-            {/* Tab Navigation */}
-            <div className="flex justify-center gap-4 mb-8">
-              {['create', 'pick', 'view'].map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab as any)}
-                  className={`px-8 py-4 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 ${
-                    activeTab === tab
-                      ? 'bg-white text-purple-900 shadow-2xl'
-                      : 'bg-white/10 text-white hover:bg-white/20 backdrop-blur-md'
-                  }`}
-                >
-                  {tab === 'create' && 'Create Raffle'}
-                  {tab === 'pick' && 'Pick Winners'}
-                  {tab === 'view' && 'View Raffle'}
-                </button>
-              ))}
-            </div>
-
-            {/* Tab Content */}
-            <div className="bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl p-8">
-              {activeTab === 'create' && <CreateRaffleTab isAbstractWallet={isAbstractWallet} />}
-              {activeTab === 'pick' && <PickWinnersTab isAbstractWallet={isAbstractWallet} />}
-              {activeTab === 'view' && <ViewRaffleTab />}
-            </div>
+      <div className="relative z-10 mx-auto max-w-6xl px-4 py-8">
+        {/* Header with Wallet Buttons ALWAYS at Top */}
+        <div className="mb-8">
+          <div className="text-center mb-4">
+            <h1 className="text-5xl font-bold mb-2">Raffle dApp</h1>
+            <p className="text-blue-200">Provably Fair On-Chain Raffles</p>
           </div>
-        )}
+
+          {/* Wallet Connection - Always Visible */}
+          <div className="flex justify-center gap-3 mb-4">
+            {!isConnected ? (
+              <>
+                {connectors.map((conn) => (
+                  <button
+                    key={conn.id}
+                    onClick={() => handleConnect(conn)}
+                    className="bg-white/10 hover:bg-white/20 text-white font-semibold py-3 px-6 rounded-xl transition-all border border-white/20"
+                  >
+                    {conn.id === 'abstract' ? 'Connect with Abstract' : 
+                     conn.name.includes('MetaMask') || conn.name.includes('Injected') ? 'Connect MetaMask' : 
+                     `Connect ${conn.name}`}
+                  </button>
+                ))}
+              </>
+            ) : (
+              <div className="flex items-center gap-4">
+                <div className="bg-white/10 backdrop-blur-md rounded-xl px-4 py-2 border border-white/20">
+                  <p className="text-sm text-blue-300">
+                    {isAbstractWallet ? 'Connected via Abstract' : 'Connected via Browser Wallet'}
+                  </p>
+                  <p className="font-mono text-sm">{address?.slice(0, 6)}...{address?.slice(-4)}</p>
+                </div>
+                <button
+                  onClick={() => disconnect()}
+                  className="bg-white/10 hover:bg-white/20 text-white font-semibold py-2 px-4 rounded-xl border border-white/20"
+                >
+                  Disconnect
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Main Content - ALWAYS VISIBLE */}
+        <CreateRaffleSection isAbstractWallet={isAbstractWallet} address={address} isConnected={isConnected} />
+
+        <div className="grid gap-6 md:grid-cols-2 mb-8">
+          <PickWinnersSection isAbstractWallet={isAbstractWallet} address={address} isConnected={isConnected} />
+          <LoadRaffleSection isConnected={isConnected} />
+        </div>
       </div>
     </div>
   );
 }
 
-// CREATE RAFFLE TAB
-function CreateRaffleTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
+function CreateRaffleSection({ isAbstractWallet, address, isConnected }: { isAbstractWallet: boolean; address?: `0x${string}`; isConnected: boolean }) {
   const [raffleName, setRaffleName] = useState('');
   const [participantsText, setParticipantsText] = useState('');
   const [status, setStatus] = useState('');
 
-  const { address, chain } = useAccount();
+  const { chain } = useAccount();
   const { writeContractSponsored, isPending: isPendingSponsored } = useWriteContractSponsored();
   const { writeContract, isPending: isPendingStandard } = useWriteContract();
 
   const isPending = isPendingSponsored || isPendingStandard;
 
   const handleCreateRaffle = async () => {
-    if (!raffleName.trim()) {
-      setStatus('Please enter a raffle name');
-      return;
-    }
+    if (!isConnected) { setStatus('Connect wallet first'); return; }
+    if (!raffleName.trim()) { setStatus('Enter a raffle name'); return; }
 
     const participants = participantsText
       .split('\n')
       .map(addr => addr.trim())
       .filter(addr => addr && isAddress(addr)) as `0x${string}`[];
 
-    if (participants.length === 0) {
-      setStatus('Please enter at least one valid address');
-      return;
-    }
+    if (participants.length === 0) { setStatus('Enter at least one valid address'); return; }
 
     setStatus('Creating raffle...');
 
@@ -262,7 +369,7 @@ function CreateRaffleTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
           chain,
           account: address,
         });
-        setStatus('Raffle created (gasless)!');
+        setStatus('Raffle created (gasless)');
       } else {
         writeContract({
           address: RAFFLE_CONTRACT_ADDRESS,
@@ -270,41 +377,41 @@ function CreateRaffleTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
           functionName: 'createRaffle',
           args: [participants, raffleName, false],
         } as any);
-        setStatus('Transaction sent!');
+        setStatus('Transaction sent');
       }
 
       setRaffleName('');
       setParticipantsText('');
     } catch (error: any) {
-      setStatus(`Error: ${error?.message || 'Unknown error'}`);
+      setStatus(`Error: ${error?.message || 'Unknown'}`);
     }
   };
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-3xl font-bold text-white mb-6">Create New Raffle</h2>
+    <section className="mb-8 rounded-2xl border border-white/15 bg-white/5 backdrop-blur p-6">
+      <h2 className="text-2xl font-bold mb-4">Create Raffle</h2>
       
-      <div>
-        <label className="block text-blue-200 font-semibold mb-2">Raffle Name</label>
+      <div className="mb-4">
+        <label className="block text-blue-200 font-semibold mb-2 text-sm">Raffle Name</label>
         <input
           type="text"
           value={raffleName}
           onChange={(e) => setRaffleName(e.target.value)}
-          placeholder="My Amazing Raffle"
-          className="w-full bg-white/20 border border-white/30 rounded-xl px-4 py-3 text-white placeholder-blue-300/50 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          placeholder="My Raffle"
+          disabled={!isConnected}
+          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white placeholder-blue-300/50 disabled:opacity-50"
         />
       </div>
 
-      <div>
-        <label className="block text-blue-200 font-semibold mb-2">
-          Participants (one address per line)
-        </label>
+      <div className="mb-4">
+        <label className="block text-blue-200 font-semibold mb-2 text-sm">Participants (one per line)</label>
         <textarea
           value={participantsText}
           onChange={(e) => setParticipantsText(e.target.value)}
           placeholder="0xabc...&#10;0xdef..."
-          rows={8}
-          className="w-full bg-white/20 border border-white/30 rounded-xl px-4 py-3 text-white placeholder-blue-300/50 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono text-sm"
+          rows={6}
+          disabled={!isConnected}
+          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white placeholder-blue-300/50 font-mono text-sm disabled:opacity-50"
         />
         <p className="text-xs text-purple-300 mt-1">
           {participantsText.split('\n').filter(l => l.trim() && isAddress(l.trim())).length} valid addresses
@@ -313,38 +420,33 @@ function CreateRaffleTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
 
       <button
         onClick={handleCreateRaffle}
-        disabled={isPending}
-        className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105 shadow-lg disabled:opacity-50"
+        disabled={isPending || !isConnected}
+        className="w-full bg-white/10 hover:bg-white/20 text-white font-bold py-3 rounded-xl border border-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
       >
         {isPending ? 'Creating...' : 'Create Raffle'}
       </button>
 
       {status && (
-        <div className="mt-4 p-4 bg-white/10 rounded-xl text-center text-white">
-          {status}
-        </div>
+        <div className="mt-4 p-3 bg-white/10 rounded-xl text-center text-sm">{status}</div>
       )}
-    </div>
+    </section>
   );
 }
 
-// PICK WINNERS TAB
-function PickWinnersTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
+function PickWinnersSection({ isAbstractWallet, address, isConnected }: { isAbstractWallet: boolean; address?: `0x${string}`; isConnected: boolean }) {
   const [raffleId, setRaffleId] = useState('');
   const [winnerCount, setWinnerCount] = useState('1');
   const [status, setStatus] = useState('');
 
-  const { address, chain } = useAccount();
+  const { chain } = useAccount();
   const { writeContractSponsored, isPending: isPendingSponsored } = useWriteContractSponsored();
   const { writeContract, isPending: isPendingStandard } = useWriteContract();
 
   const isPending = isPendingSponsored || isPendingStandard;
 
   const handlePickWinners = async () => {
-    if (!raffleId || !winnerCount) {
-      setStatus('Please enter raffle ID and winner count');
-      return;
-    }
+    if (!isConnected) { setStatus('Connect wallet first'); return; }
+    if (!raffleId || !winnerCount) { setStatus('Enter raffle ID and winner count'); return; }
 
     setStatus('Picking winners...');
 
@@ -362,7 +464,7 @@ function PickWinnersTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
           chain,
           account: address,
         });
-        setStatus('Winners picked!');
+        setStatus('Winners picked');
       } else {
         writeContract({
           address: RAFFLE_CONTRACT_ADDRESS,
@@ -370,61 +472,60 @@ function PickWinnersTab({ isAbstractWallet }: { isAbstractWallet: boolean }) {
           functionName: 'pickWinners',
           args: [BigInt(raffleId), BigInt(winnerCount), randomSeed],
         } as any);
-        setStatus('Transaction sent!');
+        setStatus('Transaction sent');
       }
 
       setRaffleId('');
       setWinnerCount('1');
     } catch (error: any) {
-      setStatus(`Error: ${error?.message || 'Unknown error'}`);
+      setStatus(`Error: ${error?.message || 'Unknown'}`);
     }
   };
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-3xl font-bold text-white mb-6">Pick Winners</h2>
+    <div className="rounded-2xl border border-white/15 bg-white/5 backdrop-blur p-6">
+      <h2 className="text-2xl font-bold mb-4">Pick Winners</h2>
       
-      <div>
-        <label className="block text-blue-200 font-semibold mb-2">Raffle ID</label>
+      <div className="mb-3">
+        <label className="block text-blue-200 font-semibold mb-2 text-sm">Raffle ID</label>
         <input
-          type="text"
+          type="number"
           value={raffleId}
           onChange={(e) => setRaffleId(e.target.value)}
           placeholder="0"
-          className="w-full bg-white/20 border border-white/30 rounded-xl px-4 py-3 text-white placeholder-blue-300/50 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          disabled={!isConnected}
+          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white disabled:opacity-50"
         />
       </div>
 
-      <div>
-        <label className="block text-blue-200 font-semibold mb-2">Number of Winners</label>
+      <div className="mb-4">
+        <label className="block text-blue-200 font-semibold mb-2 text-sm">Winners</label>
         <input
           type="number"
           value={winnerCount}
           onChange={(e) => setWinnerCount(e.target.value)}
           min="1"
-          className="w-full bg-white/20 border border-white/30 rounded-xl px-4 py-3 text-white placeholder-blue-300/50 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          disabled={!isConnected}
+          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white disabled:opacity-50"
         />
       </div>
 
       <button
         onClick={handlePickWinners}
-        disabled={isPending}
-        className="w-full bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105 shadow-lg disabled:opacity-50"
+        disabled={isPending || !isConnected}
+        className="w-full bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white font-bold py-3 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {isPending ? 'Picking...' : 'Pick Winners'}
       </button>
 
       {status && (
-        <div className="mt-4 p-4 bg-white/10 rounded-xl text-center text-white">
-          {status}
-        </div>
+        <div className="mt-4 p-3 bg-white/10 rounded-xl text-center text-sm">{status}</div>
       )}
     </div>
   );
 }
 
-// VIEW RAFFLE TAB
-function ViewRaffleTab() {
+function LoadRaffleSection({ isConnected }: { isConnected: boolean }) {
   const [raffleId, setRaffleId] = useState('');
 
   const { data: nextRaffleId } = useReadContract({
@@ -455,67 +556,63 @@ function ViewRaffleTab() {
   });
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-3xl font-bold text-white mb-6">View Raffle Details</h2>
+    <div className="rounded-2xl border border-white/15 bg-white/5 backdrop-blur p-6">
+      <h2 className="text-2xl font-bold mb-4">Load Raffle Info</h2>
 
-      <div className="p-4 bg-white/10 rounded-xl">
-        <p className="text-sm text-white">
-          <strong>Total Raffles Created:</strong> {nextRaffleId ? nextRaffleId.toString() : '...'}
+      <div className="mb-3 p-3 bg-white/10 rounded-xl">
+        <p className="text-sm">
+          <strong>Total Raffles:</strong> {nextRaffleId ? nextRaffleId.toString() : '...'}
         </p>
       </div>
 
-      <div>
-        <label className="block text-blue-200 font-semibold mb-2">Raffle ID</label>
+      <div className="mb-4">
+        <label className="block text-blue-200 font-semibold mb-2 text-sm">Raffle ID</label>
         <input
-          type="text"
+          type="number"
           value={raffleId}
           onChange={(e) => setRaffleId(e.target.value)}
           placeholder="0"
-          className="w-full bg-white/20 border border-white/30 rounded-xl px-4 py-3 text-white placeholder-blue-300/50 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white"
         />
       </div>
 
       {raffleId && raffleInfo && (
         <div className="space-y-4">
-          <div className="p-6 bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500 rounded-xl">
-            <h3 className="text-2xl font-bold text-white mb-4">{raffleInfo[0]}</h3>
-            <div className="grid grid-cols-2 gap-4 text-sm text-white">
+          <div className="p-4 bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30 rounded-xl">
+            <h3 className="text-xl font-bold mb-3">{raffleInfo[0]}</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
                 <p className="text-purple-300">Participants</p>
-                <p className="font-bold text-lg">{raffleInfo[1].toString()}</p>
+                <p className="font-bold">{raffleInfo[1].toString()}</p>
               </div>
               <div>
-                <p className="text-purple-300">Winners Selected</p>
-                <p className="font-bold text-lg">{raffleInfo[2].toString()}</p>
+                <p className="text-purple-300">Winners</p>
+                <p className="font-bold">{raffleInfo[2].toString()}</p>
               </div>
               <div>
                 <p className="text-purple-300">Status</p>
-                <p className="font-bold text-lg">{raffleInfo[5] ? 'Completed' : 'Pending'}</p>
+                <p className="font-bold">{raffleInfo[5] ? 'Done' : 'Active'}</p>
               </div>
             </div>
           </div>
 
           {participants && participants.length > 0 && (
-            <div className="p-4 bg-white/10 rounded-xl">
-              <h4 className="font-bold text-white mb-3">Participants ({participants.length})</h4>
-              <div className="max-h-48 overflow-y-auto space-y-2">
+            <div className="p-3 bg-white/10 rounded-xl">
+              <h4 className="font-bold mb-2 text-sm">Participants ({participants.length})</h4>
+              <div className="max-h-32 overflow-y-auto space-y-1">
                 {participants.map((addr, i) => (
-                  <div key={i} className="text-xs font-mono bg-black/30 p-3 rounded-lg text-white break-all">
-                    {addr}
-                  </div>
+                  <div key={i} className="text-xs font-mono bg-black/30 p-2 rounded break-all">{addr}</div>
                 ))}
               </div>
             </div>
           )}
 
           {winners && winners.length > 0 && (
-            <div className="p-4 bg-gradient-to-r from-yellow-500/20 to-orange-500/20 border border-yellow-500 rounded-xl">
-              <h4 className="font-bold text-white mb-3">Winners ({winners.length})</h4>
-              <div className="space-y-2">
+            <div className="p-3 bg-gradient-to-r from-yellow-500/20 to-orange-500/20 border border-yellow-500/30 rounded-xl">
+              <h4 className="font-bold mb-2 text-sm">Winners ({winners.length})</h4>
+              <div className="space-y-1">
                 {winners.map((addr, i) => (
-                  <div key={i} className="text-xs font-mono bg-black/30 p-3 rounded-lg text-white break-all">
-                    {addr}
-                  </div>
+                  <div key={i} className="text-xs font-mono bg-black/30 p-2 rounded break-all">{addr}</div>
                 ))}
               </div>
             </div>
